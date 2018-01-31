@@ -26,7 +26,8 @@ import os
 
 
 def transgene_disk(rna_bamfiles, tdna_bam=None):
-    return int(ceil(rna_bamfiles['rna_genome']['rna_genome_sorted.bam'].size) +
+    return int((ceil(rna_bamfiles['rna_genome']['rna_genome_sorted.bam'].size)
+                if rna_bamfiles else 0) +
                (ceil(tdna_bam['tumor_dna_fix_pg_sorted.bam'].size) if tdna_bam is not None else 0) +
                104857600)
 
@@ -57,12 +58,23 @@ def run_transgene(job, snpeffed_file, rna_bam, univ_options, transgene_options, 
     :rtype: dict
     """
     job.fileStore.logToMaster('Running transgene on %s' % univ_options['patient'])
+    assert snpeffed_file or fusion_calls
+
     work_dir = os.getcwd()
     input_files = {
-        'snpeffed_muts.vcf': snpeffed_file,
-        'rna.bam': rna_bam['rna_genome']['rna_genome_sorted.bam'],
-        'rna.bam.bai': rna_bam['rna_genome']['rna_genome_sorted.bam.bai'],
-        'pepts.fa.tar.gz': transgene_options['gencode_peptide_fasta']}
+        'pepts.fa.tar.gz': transgene_options['gencode_peptide_fasta'],
+        'annotation.gtf.tar.gz': transgene_options['gencode_annotation_gtf'],
+        'genome.fa.tar.gz': transgene_options['genome_fasta']
+    }
+
+    if snpeffed_file is not None:
+        input_files.update({
+            'snpeffed_muts.vcf': snpeffed_file})
+    if rna_bam:
+        input_files.update({
+            'rna.bam': rna_bam['rna_genome']['rna_genome_sorted.bam'],
+            'rna.bam.bai': rna_bam['rna_genome']['rna_genome_sorted.bam.bai'],
+        })
     if tumor_dna_bam is not None:
         input_files.update({
             'tumor_dna.bam': tumor_dna_bam['tumor_dna_fix_pg_sorted.bam'],
@@ -70,33 +82,35 @@ def run_transgene(job, snpeffed_file, rna_bam, univ_options, transgene_options, 
         })
     input_files = get_files_from_filestore(job, input_files, work_dir, docker=False)
     input_files['pepts.fa'] = untargz(input_files['pepts.fa.tar.gz'], work_dir)
+    input_files['genome.fa'] = untargz(input_files['genome.fa.tar.gz'], work_dir)
+    input_files['annotation.gtf'] = untargz(input_files['annotation.gtf.tar.gz'], work_dir)
     input_files = {key: docker_path(path) for key, path in input_files.items()}
 
     parameters = ['--peptides', input_files['pepts.fa'],
-                  '--snpeff', input_files['snpeffed_muts.vcf'],
-                  '--rna_file', input_files['rna.bam'],
                   '--prefix', 'transgened',
                   '--pep_lens', '9,10,15',
-                  '--cores', str(transgene_options['n'])]
+                  '--cores', str(transgene_options['n']),
+                  '--genome', input_files['genome.fa'],
+                  '--annotation', input_files['annotation.gtf']]
+
+    if snpeffed_file is not None:
+        parameters.extend(['--snpeff', input_files['snpeffed_muts.vcf']])
+    if rna_bam:
+        parameters.extend(['--rna_file', input_files['rna.bam']])
 
     if tumor_dna_bam is not None:
         parameters.extend(['--dna_file', input_files['tumor_dna.bam']])
 
     if fusion_calls:
         fusion_files = {'fusion_calls': fusion_calls,
-                        'transcripts.fa.tar.gz': transgene_options['gencode_transcript_fasta'],
-                        'annotation.gtf.tar.gz': transgene_options['gencode_annotation_gtf'],
-                        'genome.fa.tar.gz': transgene_options['genome_fasta']}
+                        'transcripts.fa.tar.gz': transgene_options['gencode_transcript_fasta']
+                        }
 
         fusion_files = get_files_from_filestore(job, fusion_files, work_dir, docker=False)
         fusion_files['transcripts.fa'] = untargz(fusion_files['transcripts.fa.tar.gz'], work_dir)
-        fusion_files['genome.fa'] = untargz(fusion_files['genome.fa.tar.gz'], work_dir)
-        fusion_files['annotation.gtf'] = untargz(fusion_files['annotation.gtf.tar.gz'], work_dir)
         fusion_files = {key: docker_path(path) for key, path in fusion_files.items()}
         parameters += ['--transcripts', fusion_files['transcripts.fa'],
-                       '--fusions', fusion_files['fusion_calls'],
-                       '--genome', fusion_files['genome.fa'],
-                       '--annotation', fusion_files['annotation.gtf']]
+                       '--fusions', fusion_files['fusion_calls']]
 
     docker_call(tool='transgene',
                 tool_parameters=parameters,
@@ -113,7 +127,9 @@ def run_transgene(job, snpeffed_file, rna_bam, univ_options, transgene_options, 
         mapfile = '_'.join(['transgened_tumor', peplen, 'mer_snpeffed.faa.map'])
         output_files[mapfile] = job.fileStore.writeGlobalFile(os.path.join(work_dir, mapfile))
         export_results(job, output_files[mapfile], mapfile, univ_options, subfolder='peptides')
-    os.rename('transgened_transgened.vcf', 'mutations.vcf')
-    export_results(job, job.fileStore.writeGlobalFile('mutations.vcf'), 'mutations.vcf',
-                   univ_options, subfolder='mutations/transgened')
+    if snpeffed_file:
+        # There won't be an output vcf if there's no input
+        os.rename('transgened_transgened.vcf', 'mutations.vcf')
+        export_results(job, job.fileStore.writeGlobalFile('mutations.vcf'), 'mutations.vcf',
+                       univ_options, subfolder='mutations/transgened')
     return output_files
